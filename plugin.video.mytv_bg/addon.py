@@ -13,6 +13,8 @@ import os.path
 from urllib2 import Request
 import urllib
 import urllib2
+import datetime
+import time
 
 __addon__ 			= xbmcaddon.Addon()
 __addon_name__		= __addon__.getAddonInfo('name')
@@ -72,7 +74,8 @@ plugin = Plugin_mod(__addon_name__, __id__)
 if plugin.get_setting('server_url'):
     SITE_PATH = plugin.get_setting('server_url')
 else:
-    SITE_PATH = 'http://mytv.bg/api/mobile_v2/'
+    SITE_PATH = 'http://bgtime.tv/api/mobile_v4/'
+
 
 # Onli load master menu
 ONLI_MASTER_MENU = SITE_PATH + 'menu/index'
@@ -84,13 +87,15 @@ SITE_LOGIN_PAGE = SITE_PATH + 'user/signin'
 @plugin.route('/')
 def main_menu():
 
-    request = urllib2.Request(ONLI_MASTER_MENU, headers={"User-Agent" : "XBMC/Kodi MyTV Addon " + str(__version__)})
+    request = urllib2.Request(ONLI_MASTER_MENU, headers={"User-Agent" : "XBMC/Kodi BGTime.TV Addon " + str(__version__)})
     response = urllib2.urlopen(request)
-    dataNew = json.loads(response.read())
 
+    dataNew = json.loads(response.read())
+   
     menulist = dataNew['menu']
     items = []
-    for (key, val) in enumerate(menulist):
+
+    for (key, val) in menulist.iteritems():
         label = val['title'].encode('utf-8')
         items.append({
             'label': label,
@@ -103,14 +108,16 @@ def main_menu():
 
 @plugin.route('/tvlist/<url>')
 def tvList(url):
-	args = urlparse.parse_qs(sys.argv[2][1:])
+	args = urlparse.parse_qs(sys.argv[2][1:], keep_blank_values=True, strict_parsing=False)
 	title_tmp = args.get('title', None)
+	filters = False
 	if title_tmp is None:
 		title = ''
 	else:
 		title = title_tmp[0].decode('utf-8').encode('utf-8');
-	
+
 	show_title_tmp = args.get('show_title', None)
+
 	if show_title_tmp is None:
 		show_title = ''
 	else:
@@ -136,7 +143,7 @@ def tvList(url):
 
 	if not signin.data:
 		return
-	
+
 	if 'menu' not in signin.data:
 		if 'key' not in signin.data:
 			dialog.ok(__lang__(30003), signin.data['msg'])
@@ -146,23 +153,25 @@ def tvList(url):
 				for key,val in enumerate(signin.data['quality_urls']):
 					items.append(val['title'])
 				ret = dialog.select(__lang__(30006), items)
-				tvPlay(signin.data['quality_urls'][ret]['key'], title, show_title)
+				tvPlay(signin.data['quality_urls'][ret]['key'], title, show_title, getTrackingKey(signin.data['quality_urls'][ret]))
 				return
-			tvPlay(signin.data['key'], title, show_title)
+			tvPlay(signin.data['key'], title, show_title, getTrackingKey(signin.data))
 			return
 
 	else:
 		menulist = signin.data['menu']
-		_show_title = signin.data.get('title_prev', '').encode('utf-8')
+		_show_title = signin.data.get('title_prev', ' ').encode('utf-8')
+		
 		if not menulist:
 			dialog.ok(__lang__(30003), __lang__(30004))
 		if menulist:
 			for (key, val) in enumerate(menulist):
+
 				if val['type'] == 'item':
 					items.append({
 						'label': u"{0}".format(val['title']),
 						'key': u"{0}".format(key),
-						'url': plugin.url_for('tvPlay', url=val['key']),
+						'url': plugin.url_for('tvPlay', url=val['key'], tracking_key=getTrackingKey(val)),
 						'thumb': "{0}".format(val["thumb"])})
 				elif val['type'] == 'menu':
 					label = val['title'].encode('utf-8')
@@ -173,16 +182,98 @@ def tvList(url):
 						'thumb': "{0}".format(val["thumb"])})
 
 
+
 	return plugin.add_items(items, False, [xbmcplugin.SORT_METHOD_VIDEO_SORT_TITLE, xbmcplugin.SORT_METHOD_VIDEO_TITLE])
 
+def getTrackingKey(val):
+	if 'tracking_key' in val:
+		return val['tracking_key']
+	return None
+
 @plugin.route('/tvPlay/<url>')
-def tvPlay(url, title, show_title):
+def tvPlay(url, title, show_title, tracking_key):
+	player = Player()
 	if title:
 		li = xbmcgui.ListItem(label=show_title + ' ' + title)
-		xbmc.Player().play(url, li)
+		player.play(url, li)
 	else:
-		xbmc.Player().play(url)
+		player.play(url)
+	player.is_playing = True
+	
+	player.tracking_key = tracking_key
+	now = datetime.datetime.today()
+	str_time = int(time.mktime(now.timetuple()))
+	counter = 0
+
+	while(player.is_playing):
+
+		if player.isPlaying():
+			player.info = {
+				'key'			: tracking_key,
+				'stream_started': str_time,
+				'current_time'	: int(player.getTime()),
+			}
+			if counter == 120 and tracking_key is not None:
+				counter = 0
+				player.reportPlaybackProgress(player.info, 'progress')
+		counter += 1
+		xbmc.sleep(1000)
+
+	del player
 	return
+
+
+# START # 
+class Player(xbmc.Player):
+	info 			= None
+	tracking_key 	= None
+	is_live 		= None
+	is_playing 		= False
+
+	def __init__(self):
+		xbmc.Player.__init__(self)
+
+	def onPlayBackStarted(self):
+		if self.tracking_key is not None:
+			now = datetime.datetime.today()
+			str_time = int(time.mktime(now.timetuple()))
+			self.info = {
+				'key'			: self.tracking_key,
+				'stream_started': str_time,
+				'current_time'	: int(self.getTime()),
+			}
+			self.reportPlaybackProgress(self.info, 'start')
+
+	def onPlayBackResumed(self):
+		pass 
+
+	def onPlayBackPaused(self):
+		pass
+		
+	def onPlayBackStopped(self):
+		if self.info is not None:
+			self.reportPlaybackProgress(self.info, 'stop')
+		self.is_playing = False
+
+	def onPlayBackSeek(self, time, seekOffset):
+		pass
+		
+	def reportPlaybackProgress(self, info, action):
+		if info is None: return
+		if self.tracking_key is not None:
+			
+			res = login(
+					plugin.get_setting('username'), 
+					plugin.get_setting('password'),
+					'tracking/report_playback',
+					{'key'				: self.tracking_key, 
+					'stream_started'	: str(int(info['stream_started'])),
+					'current_time'		: str(int(info['current_time'])),
+					'action' 			: action
+				})
+
+# END # 
+
 
 
 # START # Login and using token for getting data.
@@ -193,7 +284,7 @@ class login:
 	request = ""
 	login_iteration = 0
 	
-	def __init__(self, username, password, url):
+	def __init__(self, username, password, url, send = None):
 		self.usr = username
 		self.pas = password
 		self.url = url
@@ -206,8 +297,11 @@ class login:
 				return
 		
 		self.data=self.getLive()
+
+		if send is not None: 
+			self.data.update(send)		
 		self.data=self.getData(SITE_PATH + url)
-	
+
 	def logIN(self):
 		self.data = self.makeUserPass()
 		self.token = self.getData(SITE_LOGIN_PAGE)
@@ -218,7 +312,7 @@ class login:
 	
 	def getData(self, url):
 		send = urllib.urlencode(self.data)
-		self.request = urllib2.Request(url, send, headers={"User-Agent" : "XBMC/Kodi MyTV Addon " + str(__version__)})
+		self.request = urllib2.Request(url, send, headers={"User-Agent" : "XBMC/Kodi BGTime.TV Addon " + str(__version__)})
 		
 		try:
 			response = urllib2.urlopen(self.request)
@@ -300,8 +394,6 @@ class login:
 			self.writeInFile()
 		
 		
-	def __log(self, text):
-		xbmc.log('%s addon: %s' % (__addon_name__, text))
 
 # END # LOGIN
 
